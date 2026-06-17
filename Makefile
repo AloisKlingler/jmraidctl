@@ -1,14 +1,12 @@
 CC = gcc
 CFLAGS = -g -O2 -Wall -std=gnu99
-SRCDIR = src
 
-all: JMraidcon jmraidctl
+all: jmraidctl
 
-JMraidcon: $(SRCDIR)/JMraidcon.c $(SRCDIR)/jm_crc.c $(SRCDIR)/sata_xor.c
-	$(CC) $(CFLAGS) $^ -o $@
-
-jmraidctl: $(SRCDIR)/jmraidctl.c $(SRCDIR)/jm_crc.c $(SRCDIR)/sata_xor.c
+jmraidctl: src/jmraidctl.c src/jm_crc.c src/sata_xor.c
 	$(CC) $(CFLAGS) $^ -o $@
 
 clean:
-	-rm -f JMraidcon jmraidctl
+	rm -f jmraidctl
+
+.PHONY: all clean

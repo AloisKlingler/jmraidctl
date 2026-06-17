@@ -1,17 +1,16 @@
-JMraidcon - JMB39x/JMS56x RAID Controller Tools
+jmraidctl - JMB39x/JMS56x RAID Controller Tool
 
-Command-line tools for managing JMicron JMB39x and JMS56x SATA
+Command-line tool for managing JMicron JMB39x and JMS56x SATA
 hardware RAID controllers without the X-based HWRaidManager.
 
-Tools
------
-JMraidcon   Original tool - displays disk and RAID volume status
-jmraidctl   Extended tool - adds management commands:
-            - alarm-mute    Mute/unmute the RAID alarm
-            - identify      Blink disk LED for identification
-            - standby       Set disk standby timer (0-255 minutes)
-            - rebuild-priority  Set rebuild priority
-            - rebuild-status    Show rebuild progress
+Commands
+--------
+  (none)            Show RAID and disk status (default)
+  alarm-mute 0|1    Unmute/mute the RAID alarm
+  identify P 0|1    Turn disk P LED off/on for identification
+  standby M         Set disk standby timer (0-255 minutes, 0=disabled)
+  rebuild-priority  Set rebuild priority (highest/high/medium/low/lowest)
+  rebuild-status    Show rebuild progress
 
 Usage
 -----
@@ -21,6 +20,7 @@ Usage
   ./jmraidctl /dev/sgX standby 30       30-minute standby timer
   ./jmraidctl /dev/sgX rebuild-priority medium
   ./jmraidctl /dev/sgX rebuild-status
+  ./jmraidctl -h                        Show help
 
 Building
 --------

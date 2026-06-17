@@ -2,8 +2,6 @@ Building
 --------
   make
 
-This builds both JMraidcon and jmraidctl.
-
 Requirements: kernel headers with SG_IO ioctl (kernel-devel on RHEL/CentOS).
 
 Running
