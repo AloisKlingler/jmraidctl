@@ -1,4 +1,15 @@
-No installation yet, simply just 'make' it and execute (as a user that can write to the /dev/sd<X> device, typically root)
+Building
+--------
+  make
 
-To compile you need to have the kernel headers (specifically the SG_IO ioctl include files) present, for RHEL the package is called 'kernel-devel-<version>'
+This builds both JMraidcon and jmraidctl.
 
+Requirements: kernel headers with SG_IO ioctl (kernel-devel on RHEL/CentOS).
+
+Running
+-------
+Execute as root or a user with write access to the SCSI generic device:
+
+  ./jmraidctl /dev/sgX
+
+Find your RAID controller with: ls -l /dev/disk/by-id/ | grep JMicron

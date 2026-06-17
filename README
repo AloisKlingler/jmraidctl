@@ -1,12 +1,36 @@
-JMraidcon, very much a work in progress.
+JMraidcon - JMB39x/JMS56x RAID Controller Tools
 
-Attempts to communicate with the JMB394 / JMS56x SATA HW RAID controller
-to request disk and RAID volume health status, instead of having
-to run the enormous X-based HWRaidManager binary.
+Command-line tools for managing JMicron JMB39x and JMS56x SATA
+hardware RAID controllers without the X-based HWRaidManager.
 
-Currently the communication is working, but using a hard-coded
-sector number, hard-coded commands and no parsing of the responses,
-but it can clearly be seen that the disks are properly identified
-from the hex/ASCII output.
+Tools
+-----
+JMraidcon   Original tool - displays disk and RAID volume status
+jmraidctl   Extended tool - adds management commands:
+            - alarm-mute    Mute/unmute the RAID alarm
+            - identify      Blink disk LED for identification
+            - standby       Set disk standby timer (0-255 minutes)
+            - rebuild-priority  Set rebuild priority
+            - rebuild-status    Show rebuild progress
 
-added most important decoding of data from https://github.com/timschuerewegen/jmraid
+Usage
+-----
+  ./jmraidctl /dev/sgX                  Show RAID status
+  ./jmraidctl /dev/sgX alarm-mute 1     Mute alarm
+  ./jmraidctl /dev/sgX identify 0 1     Blink disk 0 LED
+  ./jmraidctl /dev/sgX standby 30       30-minute standby timer
+  ./jmraidctl /dev/sgX rebuild-priority medium
+  ./jmraidctl /dev/sgX rebuild-status
+
+Building
+--------
+  make
+
+License
+-------
+GPL v2 - see COPYING
+
+Credits
+-------
+Werner Johansson <wj@xnk.nu> - Original JMraidcon
+Tim Schuerewegen - jmraid data decoding (https://github.com/timschuerewegen/jmraid)
