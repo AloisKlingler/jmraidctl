@@ -6,22 +6,28 @@ hardware RAID controllers without the X-based HWRaidManager.
 Commands
 --------
   status            Show RAID and disk status (default)
+  info              Show controller chip/firmware info
+  disks             Show all SATA ports and disk details
   alarm-mute (sa)   Mute the RAID alarm buzzer
   identify P [stop] Blink disk P LED for identification (P=0 or 1)
   standby [secs]    Get/set disk standby timer (0=disabled)
   rebuild-priority N  Set rebuild priority (1=highest..5=lowest)
   rebuild-status    Show rebuild progress
+  smart P           Show SMART attributes for disk P
   trim P LBA COUNT  Send TRIM command to disk (JMB39x only)
 
 Usage
 -----
   ./jmraidctl /dev/sgX <jmb39x|jms56x>              Show RAID status
+  ./jmraidctl /dev/sgX jmb39x info                  Show chip info
+  ./jmraidctl /dev/sgX jmb39x disks                 Show all disks
   ./jmraidctl /dev/sgX jmb39x alarm-mute            Mute alarm
   ./jmraidctl /dev/sgX jmb39x identify 0            Blink disk 0 LED
   ./jmraidctl /dev/sgX jmb39x identify 0 stop       Stop blinking
   ./jmraidctl /dev/sgX jmb39x standby 300           5-minute standby
   ./jmraidctl /dev/sgX jmb39x rebuild-priority 3    Medium priority
   ./jmraidctl /dev/sgX jmb39x rebuild-status
+  ./jmraidctl /dev/sgX jmb39x smart 0               SMART for disk 0
   ./jmraidctl /dev/sgX jmb39x trim 0 1000000 100    TRIM 100 sectors at LBA 1000000
   ./jmraidctl -h                                    Show help
 
@@ -46,4 +52,6 @@ Credits
 -------
 Werner Johansson <wj@xnk.nu> - Original JMraidcon
 Tim Schuerewegen - jmraid data decoding (https://github.com/timschuerewegen/jmraid)
-smartmontools project - JMB39x protocol reverse engineering
+
+Protocol reverse-engineered from ODROID CloudShell2 HWRaidManager:
+https://wiki.odroid.com/accessory/add-on_boards/xu4_cloudshell2/firmware_upgrade
