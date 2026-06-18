@@ -23,6 +23,9 @@
 #include "sata_xor.h"
 #include "jmraid_commands.h"
 
+/* ATA command for TRIM */
+#define ATA_DATA_SET_MANAGEMENT 0x06
+
 #define SECTORSIZE 512
 #define READ_CMD 0x28
 #define WRITE_CMD 0x2a
@@ -88,6 +91,349 @@ static int init_controller(int fd)
         ioctl(fd, SG_IO, &io_hdr);
     }
     return 0;
+}
+
+/*
+ * Initialize controller at a specific LBA for ATA passthrough
+ * Different from RAID management which uses LBA 254
+ *
+ * This follows the smartmontools sequence:
+ * 1. Read original sector (to check state)
+ * 2. If non-zero, write zeros to reset state
+ * 3. Write 4 wakeup sectors
+ */
+static int init_controller_at_lba(int fd, uint8_t lba)
+{
+    uint32_t *probeBuf32 = (uint32_t *)g_probeBuf;
+    uint8_t saved_lba = rwCmdBlk[5];
+    uint8_t readbuf[SECTORSIZE];
+
+    /* Set LBA for all operations */
+    rwCmdBlk[5] = lba;
+
+    /* First read the current sector content */
+    io_hdr.dxfer_direction = SG_DXFER_FROM_DEV;
+    rwCmdBlk[0] = READ_CMD;
+    io_hdr.dxferp = readbuf;
+    ioctl(fd, SG_IO, &io_hdr);
+
+    /* Check if sector is non-empty */
+    int nonempty = 0;
+    for (int i = 0; i < SECTORSIZE; i++) {
+        if (readbuf[i] != 0) {
+            nonempty = 1;
+            break;
+        }
+    }
+
+    /* If non-empty, zero it to reset controller state */
+    if (nonempty) {
+        memset(g_probeBuf, 0, SECTORSIZE);
+        io_hdr.dxfer_direction = SG_DXFER_TO_DEV;
+        rwCmdBlk[0] = WRITE_CMD;
+        io_hdr.dxferp = g_probeBuf;
+        ioctl(fd, SG_IO, &io_hdr);
+    }
+
+    /* Now write the wakeup sequence (without XOR, matching smartmontools) */
+    memset(g_probeBuf, 0, SECTORSIZE);
+    probeBuf32[0] = __cpu_to_le32(JM_RAID_WAKEUP_CMD);
+    probeBuf32[0x1f8 >> 2] = __cpu_to_le32(0x10eca1db);
+    for (uint32_t i = 0x10; i < 0x1f8; i++)
+        g_probeBuf[i] = i & 0xff;
+
+    io_hdr.dxfer_direction = SG_DXFER_TO_DEV;
+    rwCmdBlk[0] = WRITE_CMD;
+    io_hdr.dxferp = g_probeBuf;
+
+    uint32_t wakeup_vals[] = {0x3c75a80b, 0x0388e337, 0x689705f3, 0xe00c523a};
+    for (int i = 0; i < 4; i++) {
+        probeBuf32[1] = __cpu_to_le32(wakeup_vals[i]);
+        uint32_t crc = JM_CRC(probeBuf32, 0x1fc >> 2);
+        probeBuf32[0x1fc >> 2] = __cpu_to_le32(crc);
+        ioctl(fd, SG_IO, &io_hdr);
+    }
+
+    /* Restore LBA */
+    rwCmdBlk[5] = saved_lba;
+    return 0;
+}
+
+/* Command ID counter for ATA passthrough at sector 250 */
+static uint32_t g_ata_cmd_id = 1;
+
+/* Reset ATA command ID counter - call after init_controller_at_lba */
+static void reset_ata_cmd_id(void)
+{
+    g_ata_cmd_id = 1;
+}
+
+/*
+ * Run JMB identify disk command to verify connection
+ * Must be called after init_controller_at_lba()
+ */
+
+static int jmb_identify_disk(int fd, uint32_t scrambled_cmd, int port, uint8_t lba_sector)
+{
+    uint8_t buf[SECTORSIZE];
+    uint8_t resp[SECTORSIZE];
+    uint32_t *buf32 = (uint32_t *)buf;
+
+    memset(buf, 0, SECTORSIZE);
+
+    /* Header */
+    buf32[0] = __cpu_to_le32(scrambled_cmd);
+    buf32[1] = __cpu_to_le32(g_ata_cmd_id++);
+
+    /* JMB identify disk command at offset 8 */
+    /* {0x00, 0x02, 0x02, 0xff, port, 0x00,0x00,0x00, port, ...} */
+    uint8_t *cmd = buf + 8;
+    cmd[0] = 0x00;
+    cmd[1] = 0x02;  /* JMS56x: 0x02 */
+    cmd[2] = 0x02;
+    cmd[3] = 0xff;
+    cmd[4] = port;
+    cmd[5] = 0x00;
+    cmd[6] = 0x00;
+    cmd[7] = 0x00;
+    cmd[8] = port;
+    /* rest is zeros */
+
+    /* CRC + XOR */
+    uint32_t crc = JM_CRC(buf32, 0x7f);
+    buf32[0x7f] = __cpu_to_le32(crc);
+    SATA_XOR(buf32);
+
+    /* Set LBA */
+    uint8_t saved_lba = rwCmdBlk[5];
+    rwCmdBlk[5] = lba_sector;
+
+    /* Send */
+    io_hdr.dxfer_direction = SG_DXFER_TO_DEV;
+    rwCmdBlk[0] = WRITE_CMD;
+    io_hdr.dxferp = buf;
+    ioctl(fd, SG_IO, &io_hdr);
+
+    /* Read response */
+    io_hdr.dxfer_direction = SG_DXFER_FROM_DEV;
+    rwCmdBlk[0] = READ_CMD;
+    io_hdr.dxferp = resp;
+    ioctl(fd, SG_IO, &io_hdr);
+
+    rwCmdBlk[5] = saved_lba;
+
+    /* De-XOR and check CRC */
+    SATA_XOR((uint32_t *)resp);
+    crc = JM_CRC((uint32_t *)resp, 0x7f);
+    if (crc != __le32_to_cpu(((uint32_t *)resp)[0x7f])) {
+        fprintf(stderr, "JMB identify: CRC error\n");
+        return 1;
+    }
+
+    /* Check for device model string at offset 16 */
+    if (resp[16] < ' ') {
+        fprintf(stderr, "JMB identify: No device at port %d\n", port);
+        return 1;
+    }
+
+    return 0;
+}
+
+/*
+ * Low-level JMB39x command at specific LBA sector
+ */
+static uint32_t Do_JM_Cmd_LBA(int fd, uint32_t* cmd, uint32_t* resp, uint8_t lba)
+{
+    uint32_t myCRC = JM_CRC(cmd, 0x7f);
+    cmd[0x7f] = __cpu_to_le32(myCRC);
+    SATA_XOR(cmd);
+
+    /* Temporarily change LBA in command block */
+    uint8_t saved_lba = rwCmdBlk[5];
+    rwCmdBlk[5] = lba;
+
+    io_hdr.dxfer_direction = SG_DXFER_TO_DEV;
+    rwCmdBlk[0] = WRITE_CMD;
+    io_hdr.dxferp = cmd;
+    ioctl(fd, SG_IO, &io_hdr);
+
+    io_hdr.dxfer_direction = SG_DXFER_FROM_DEV;
+    rwCmdBlk[0] = READ_CMD;
+    io_hdr.dxferp = resp;
+    ioctl(fd, SG_IO, &io_hdr);
+
+    /* Restore original LBA */
+    rwCmdBlk[5] = saved_lba;
+
+    SATA_XOR(resp);
+    myCRC = JM_CRC(resp, 0x7f);
+    return (myCRC == __le32_to_cpu(resp[0x7f])) ? 0 : 1;
+}
+
+/*
+ * Send ATA passthrough command with DATA OUT
+ * Based on smartmontools jmb39x protocol analysis
+ *
+ * Uses sector 250 (0xfa) for ATA passthrough, matching smartmontools behavior.
+ *
+ * Protocol structure (512-byte sector):
+ *   Bytes 0-7:   Header (magic, command number)
+ *   Bytes 8-31:  ATA command descriptor (24 bytes)
+ *   Bytes 32-507: Data area (for DATA OUT, up to 476 bytes)
+ *   Bytes 508-511: CRC
+ *
+ * ATA command descriptor:
+ *   [0] = 0x00
+ *   [1] = 0x02 (JM_CMD_TYPE_SATA)
+ *   [2] = 0x03 (JM_SATA_ATA_PASSTHRU)
+ *   [3] = 0xff
+ *   [4] = port (0 or 1)
+ *   [5] = ata_read_size: 0x01=NO DATA, 0x02=DATA IN, 0x03=DATA OUT
+ *   [6] = 0x00
+ *   [7] = ata_read_addr: 0x00 for NO DATA, 0xe0 for DATA IN/OUT
+ *   [8-9] = 0x00
+ *   [10] = features (low)
+ *   [11] = features (high, for 48-bit)
+ *   [12] = sector_count (low)
+ *   [13] = sector_count (high, for 48-bit)
+ *   [14] = lba_low (low)
+ *   [15] = lba_low (high)
+ *   [16] = lba_mid (low)
+ *   [17] = lba_mid (high)
+ *   [18] = lba_high (low)
+ *   [19] = lba_high (high)
+ *   [20] = device (0xa0)
+ *   [21] = 0x00
+ *   [22] = command
+ *   [23] = status (returned)
+ */
+static int cmd_ata_passthru_out(int fd, uint32_t scrambled_cmd, int port,
+                                uint8_t command, uint8_t features, uint8_t sector_count,
+                                const uint8_t *data_out, unsigned data_out_size,
+                                uint8_t lba_sector)
+{
+    uint8_t buf[SECTORSIZE];
+    uint8_t resp[SECTORSIZE];
+    uint32_t *buf32 = (uint32_t *)buf;
+
+    memset(buf, 0, SECTORSIZE);
+
+    /* Header - use same command ID counter as identify */
+    buf32[0] = __cpu_to_le32(scrambled_cmd);
+    buf32[1] = __cpu_to_le32(g_ata_cmd_id++);
+
+    /* ATA command descriptor at offset 8 */
+    uint8_t *cmd = buf + 8;
+
+    cmd[0] = 0x00;
+    cmd[1] = JM_CMD_TYPE_SATA;
+    cmd[2] = JM_SATA_ATA_PASSTHRU;
+    cmd[3] = 0xff;
+    cmd[4] = port;
+    cmd[5] = 0x03;  /* ata_read_size: 0x03 = DATA OUT */
+    cmd[6] = 0x00;
+    cmd[7] = 0xe0;  /* ata_read_addr: 0xe0 for DATA OUT */
+    cmd[8] = 0x00;
+    cmd[9] = 0x00;
+    cmd[10] = features;      /* features low */
+    cmd[11] = 0x00;          /* features high */
+    cmd[12] = sector_count;  /* sector count low */
+    cmd[13] = 0x00;          /* sector count high */
+    cmd[14] = 0x00;          /* lba_low */
+    cmd[15] = 0x00;
+    cmd[16] = 0x00;          /* lba_mid */
+    cmd[17] = 0x00;
+    cmd[18] = 0x00;          /* lba_high */
+    cmd[19] = 0x00;
+    cmd[20] = 0xa0;          /* device */
+    cmd[21] = 0x00;
+    cmd[22] = command;
+    cmd[23] = 0x00;          /* status (returned) */
+
+    /* Embed data at offset 32 (after 8-byte header + 24-byte command) */
+    if (data_out && data_out_size > 0) {
+        unsigned max_data = SECTORSIZE - 32 - 4;  /* 476 bytes max */
+        if (data_out_size > max_data)
+            data_out_size = max_data;
+        memcpy(buf + 32, data_out, data_out_size);
+    }
+
+    /* Use specific LBA sector for ATA passthrough */
+    if (Do_JM_Cmd_LBA(fd, buf32, (uint32_t *)resp, lba_sector) != 0) {
+        fprintf(stderr, "CRC error in response\n");
+        return 1;
+    }
+
+    /* Check ATA status register at offset 31 (8 + 23) */
+    uint8_t status = resp[31];
+    if (status == 0x00) {
+        fprintf(stderr, "ATA passthrough not supported (status=0x00)\n");
+        fprintf(stderr, "Note: JMS56x controllers do not support DATA OUT commands like TRIM.\n");
+        fprintf(stderr, "Use JMB39x controllers for TRIM support.\n");
+        return 1;
+    }
+    if ((status & 0xc1) != 0x40) {  /* !(!BSY && DRDY && !ERR) */
+        if (status & 0x01) {
+            fprintf(stderr, "ATA command failed with error (status=0x%02x)\n", status);
+            fprintf(stderr, "The drive may not support TRIM.\n");
+        } else {
+            fprintf(stderr, "ATA command failed (status=0x%02x)\n", status);
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
+static int cmd_trim(int fd, uint32_t scrambled_cmd, int port, uint64_t lba, uint16_t count, uint8_t lba_sector)
+{
+    /*
+     * TRIM uses DATA SET MANAGEMENT command (0x06)
+     * Features = 0x01 (TRIM bit set)
+     * Sector count = number of 512-byte data blocks (1 for up to 64 ranges)
+     *
+     * Data format: array of 8-byte range descriptors
+     *   Bytes 0-5: LBA (48-bit little-endian)
+     *   Bytes 6-7: Range length in sectors (16-bit little-endian)
+     *
+     * We can fit up to 59 ranges in 476 bytes (476/8 = 59)
+     */
+    uint8_t trim_data[512];
+    memset(trim_data, 0, sizeof(trim_data));
+
+    /* Build one TRIM range descriptor */
+    trim_data[0] = lba & 0xff;
+    trim_data[1] = (lba >> 8) & 0xff;
+    trim_data[2] = (lba >> 16) & 0xff;
+    trim_data[3] = (lba >> 24) & 0xff;
+    trim_data[4] = (lba >> 32) & 0xff;
+    trim_data[5] = (lba >> 40) & 0xff;
+    trim_data[6] = count & 0xff;
+    trim_data[7] = (count >> 8) & 0xff;
+
+    printf("Sending TRIM: LBA=%llu, count=%u sectors to port %d (sector %d)\n",
+           (unsigned long long)lba, count, port, lba_sector);
+
+    /* Initialize controller at the ATA passthrough LBA */
+    init_controller_at_lba(fd, lba_sector);
+    reset_ata_cmd_id();
+
+    /* Run identify disk command to verify connection */
+    if (jmb_identify_disk(fd, scrambled_cmd, port, lba_sector) != 0) {
+        return 1;
+    }
+
+    int ret = cmd_ata_passthru_out(fd, scrambled_cmd, port,
+                                   ATA_DATA_SET_MANAGEMENT,
+                                   0x01,  /* features: TRIM */
+                                   0x01,  /* sector count: 1 block of range descriptors */
+                                   trim_data, 512,
+                                   lba_sector);
+
+    if (ret == 0) {
+        printf("TRIM command completed successfully\n");
+    }
+    return ret;
 }
 
 static int cmd_alarm_mute(int fd, uint32_t scrambled_cmd)
@@ -393,6 +739,7 @@ static void usage(const char *prog)
     printf("  standby (st) [secs]  Get/set standby timer (0=disable)\n");
     printf("  rebuild-priority (sp) <n>  Set rebuild priority (1=highest..5=lowest)\n");
     printf("  rebuild-status (gr)  Show rebuild status\n");
+    printf("  trim <port> <lba> <count> [sector]  Send TRIM (JMB39x only, default sector: 250)\n");
     printf("  -h, --help           Show this help\n");
 }
 
@@ -491,6 +838,22 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(cmd, "rebuild-status") == 0 || strcmp(cmd, "gr") == 0) {
         ret = cmd_rebuild_status(fd, scrambled_cmd);
+    }
+    else if (strcmp(cmd, "trim") == 0) {
+        if (argc < 7) {
+            fprintf(stderr, "Usage: trim <port> <lba> <count> [sector]\n");
+            fprintf(stderr, "  port:   SATA port (0 or 1)\n");
+            fprintf(stderr, "  lba:    Starting LBA to TRIM\n");
+            fprintf(stderr, "  count:  Number of sectors to TRIM (max 65535)\n");
+            fprintf(stderr, "  sector: Communication sector (default: 250)\n");
+            ret = 1;
+        } else {
+            int port = atoi(argv[4]);
+            uint64_t lba = strtoull(argv[5], NULL, 0);
+            uint16_t count = atoi(argv[6]);
+            uint8_t lba_sector = (argc > 7) ? atoi(argv[7]) : 250;
+            ret = cmd_trim(fd, scrambled_cmd, port, lba, count, lba_sector);
+        }
     }
     else {
         fprintf(stderr, "Unknown command: %s\n", cmd);
