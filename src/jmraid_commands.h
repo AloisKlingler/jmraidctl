@@ -8,7 +8,7 @@
  * Command codes reverse-engineered from raidmgr_static
  */
 
-/* Command type codes (byte 0) */
+/* Command type codes (byte 1 in command buffer) */
 #define JM_CMD_TYPE_CHIP    0x01
 #define JM_CMD_TYPE_SATA    0x02
 #define JM_CMD_TYPE_RAID    0x03
@@ -17,12 +17,12 @@
 /* Sub-command codes for SATA/Disk operations (type 0x02) */
 #define JM_SATA_GET_INFO       0x01  /* Get SATA summary info */
 #define JM_SATA_GET_PORT_INFO  0x02  /* Get SATA port details */
-#define JM_SATA_ATA_PASSTHRU   0x03  /* ATA passthrough (SMART) */
+#define JM_SATA_ATA_PASSTHRU   0x03  /* ATA passthrough (SMART, TRIM) */
 #define JM_SATA_IDENTIFY_DISK  0x06  /* Blink disk LED */
 
 /* Sub-command codes for RAID operations (type 0x03) */
 #define JM_RAID_GET_PORT_INFO  0x02  /* Get RAID port info */
-#define JM_RAID_CREATE_DELETE  0x04  /* Create/delete RAID */
+#define JM_RAID_CREATE_DELETE  0x04  /* Create/delete RAID (UNTESTED) */
 #define JM_RAID_MODIFY_PARAM   0x06  /* Modify RAID parameters */
 
 /* ModifyRaidParam operation types (used with JM_RAID_MODIFY_PARAM) */
@@ -40,4 +40,24 @@
 /* Response offsets */
 #define JM_RESP_OFFSET_STANDARD 0x0C  /* Standard response data offset */
 
-#endif
+/*
+ * UNTESTED: RAID create/delete operation modes (used with JM_RAID_CREATE_DELETE)
+ * Reverse-engineered from ODROID HWRaidManager - may not work on jumper-based controllers
+ */
+#define JM_RAID_OP_DELETE       0x01
+#define JM_RAID_OP_CREATE       0x02
+
+/* UNTESTED: Spare disk operation codes */
+#define JM_SPARE_OP_ADD         0x92
+#define JM_SPARE_OP_DELETE      0xc8
+
+/* RAID levels for create */
+#define JM_RAID_LEVEL_RAID0     0x00
+#define JM_RAID_LEVEL_RAID1     0x01
+#define JM_RAID_LEVEL_JBOD      0x02
+#define JM_RAID_LEVEL_RAID3     0x03
+#define JM_RAID_LEVEL_CLONE     0x04
+#define JM_RAID_LEVEL_RAID5     0x05
+#define JM_RAID_LEVEL_RAID10    0x06
+
+#endif /* _JMRAID_COMMANDS_H_ */

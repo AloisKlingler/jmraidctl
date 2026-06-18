@@ -919,6 +919,12 @@ static int cmd_status(int fd, uint32_t scrambled_cmd, const char *controller_typ
     return 0;
 }
 
+/* Forward declarations for UNTESTED commands */
+static int cmd_raid_create(int fd, uint32_t scrambled_cmd, int level, int disks, int stripe_kb);
+static int cmd_raid_delete(int fd, uint32_t scrambled_cmd, int raid_port);
+static int cmd_spare_add(int fd, uint32_t scrambled_cmd, int disk, int raid_port);
+static int cmd_spare_delete(int fd, uint32_t scrambled_cmd, int disk, int raid_port);
+
 static void usage(const char *prog)
 {
     printf("jmraidctl - JMB39x/JMS56x RAID controller management tool\n\n");
@@ -936,9 +942,13 @@ static void usage(const char *prog)
     printf("  rebuild-priority <N> Set rebuild priority (1=highest..5=lowest)\n");
     printf("  rebuild-status       Show rebuild progress\n");
     printf("  trim <P> <lba> <cnt> Send TRIM command (JMB39x only)\n");
-    printf("  -h, --help           Show this help\n");
+    printf("\nUNTESTED COMMANDS (reverse-engineered, may not work on jumper-based controllers):\n");
+    printf("  raid-create <lvl> <disks> <stripe>  Create RAID (lvl: 0,1,5; disks: bitmask)\n");
+    printf("  raid-delete <port>                  Delete RAID array\n");
+    printf("  spare-add <disk> <raid-port>        Add spare disk\n");
+    printf("  spare-delete <disk> <raid-port>     Remove spare disk\n");
+    printf("\n  -h, --help           Show this help\n");
 }
-
 int main(int argc, char *argv[])
 {
     for (int i = 1; i < argc; i++) {
@@ -1059,6 +1069,41 @@ int main(int argc, char *argv[])
             ret = cmd_trim(fd, scrambled_cmd, port, lba, count, lba_sector);
         }
     }
+    else if (strcmp(cmd, "raid-create") == 0) {
+        if (argc < 7) {
+            fprintf(stderr, "Usage: raid-create <level> <disks-bitmask> <stripe-kb>\n");
+            fprintf(stderr, "  level: 0=RAID0, 1=RAID1, 5=RAID5\n");
+            fprintf(stderr, "  disks: bitmask (e.g., 3 for disks 0+1, 7 for 0+1+2)\n");
+            fprintf(stderr, "  stripe: stripe size in KB (64, 128, 256)\n");
+            ret = 1;
+        } else {
+            ret = cmd_raid_create(fd, scrambled_cmd, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
+        }
+    }
+    else if (strcmp(cmd, "raid-delete") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: raid-delete <raid-port>\n");
+            ret = 1;
+        } else {
+            ret = cmd_raid_delete(fd, scrambled_cmd, atoi(argv[4]));
+        }
+    }
+    else if (strcmp(cmd, "spare-add") == 0) {
+        if (argc < 6) {
+            fprintf(stderr, "Usage: spare-add <disk-port> <raid-port>\n");
+            ret = 1;
+        } else {
+            ret = cmd_spare_add(fd, scrambled_cmd, atoi(argv[4]), atoi(argv[5]));
+        }
+    }
+    else if (strcmp(cmd, "spare-delete") == 0) {
+        if (argc < 6) {
+            fprintf(stderr, "Usage: spare-delete <disk-port> <raid-port>\n");
+            ret = 1;
+        } else {
+            ret = cmd_spare_delete(fd, scrambled_cmd, atoi(argv[4]), atoi(argv[5]));
+        }
+    }
     else {
         fprintf(stderr, "Unknown command: %s\n", cmd);
         usage(argv[0]);
@@ -1067,4 +1112,210 @@ int main(int argc, char *argv[])
 
     close(fd);
     return ret;
+}
+
+/*
+ * ============================================================================
+ * UNTESTED COMMANDS - Reverse-engineered from ODROID HWRaidManager (raidmgr_static)
+ * 
+ * WARNING: These commands have NOT been tested on real hardware!
+ * Both JMB39x and JMS56x may use jumpers for RAID configuration,
+ * making these commands unsupported. Use at your own risk.
+ * ============================================================================
+ */
+
+/*
+ * Create RAID array (UNTESTED)
+ *
+ * Reverse-engineered from raidmgr_static ConfigRaid/RaidmgrCreateRaid functions.
+ * Command format: {0x03, 0x04} + 480 bytes config data
+ *
+ * The config data structure contains:
+ *   - Disk entries (16 bytes each) with port, size, flags
+ *   - RAID level, stripe size, and other parameters
+ *
+ * Parameters:
+ *   level: RAID level (0=RAID0, 1=RAID1, 2=JBOD, 5=RAID5, 6=RAID10)
+ *   disks: bitmask of disks to include (bit 0 = disk 0, etc.)
+ *   stripe_kb: stripe size in KB (64, 128, 256, etc.)
+ */
+static int cmd_raid_create(int fd, uint32_t scrambled_cmd, int level, int disks, int stripe_kb)
+{
+    uint8_t cmd[0x1E2];  /* 480 bytes config + 2 bytes header */
+    uint8_t resp[SECTORSIZE];
+
+    fprintf(stderr, "WARNING: RAID create is UNTESTED and may not work!\n");
+    fprintf(stderr, "Your controller may use jumpers for RAID configuration.\n\n");
+
+    memset(cmd, 0, sizeof(cmd));
+    cmd[0] = 0x00;
+    cmd[1] = JM_CMD_TYPE_RAID;        /* 0x03 */
+    cmd[2] = JM_RAID_CREATE_DELETE;   /* 0x04 */
+    cmd[3] = 0xff;
+    cmd[4] = 0x00;                    /* RAID port 0 */
+    cmd[5] = JM_RAID_OP_CREATE;       /* 0x02 = create */
+
+    /* RAID level at offset 0x10 in config data (offset 0x12 in full cmd) */
+    cmd[0x12] = level;
+
+    /* Stripe size encoding (offset 0x14 in config) */
+    /* Values: 64KB=0x40, 128KB=0x80, etc. */
+    cmd[0x14] = stripe_kb & 0xff;
+    cmd[0x15] = (stripe_kb >> 8) & 0xff;
+
+    /* Disk entries start at offset 0x20 in config (0x22 in full cmd) */
+    /* Each disk entry is 16 bytes */
+    int disk_offset = 0x22;
+    int member_count = 0;
+    for (int i = 0; i < 5; i++) {
+        if (disks & (1 << i)) {
+            cmd[disk_offset] = i;           /* disk port */
+            cmd[disk_offset + 1] = 0x01;    /* enabled flag */
+            disk_offset += 0x10;
+            member_count++;
+        }
+    }
+
+    /* Member count at offset 0x11 in config (0x13 in full cmd) */
+    cmd[0x13] = member_count;
+
+    printf("Creating RAID-%d with disks 0x%02x, stripe %dKB, %d members\n",
+           level, disks, stripe_kb, member_count);
+
+    send_cmd(fd, scrambled_cmd, cmd, sizeof(cmd), resp);
+
+    if (resp[0x0B] == 0x00) {
+        printf("RAID create command sent (check status to verify)\n");
+        return 0;
+    } else if (resp[0x0B] == 0xFF) {
+        fprintf(stderr, "Command not supported (controller uses jumpers?)\n");
+        return 1;
+    }
+    fprintf(stderr, "Failed (status: 0x%02x)\n", resp[0x0B]);
+    return 1;
+}
+
+/*
+ * Delete RAID array (UNTESTED)
+ *
+ * Reverse-engineered from raidmgr_static RaidmgrDeleteRaid function.
+ * Sends delete operation to specified RAID port.
+ */
+static int cmd_raid_delete(int fd, uint32_t scrambled_cmd, int raid_port)
+{
+    uint8_t cmd[0x1E2];
+    uint8_t resp[SECTORSIZE];
+
+    fprintf(stderr, "WARNING: RAID delete is UNTESTED and may not work!\n");
+    fprintf(stderr, "Your controller may use jumpers for RAID configuration.\n");
+    fprintf(stderr, "THIS WILL DESTROY ALL DATA ON THE RAID!\n\n");
+
+    memset(cmd, 0, sizeof(cmd));
+    cmd[0] = 0x00;
+    cmd[1] = JM_CMD_TYPE_RAID;        /* 0x03 */
+    cmd[2] = JM_RAID_CREATE_DELETE;   /* 0x04 */
+    cmd[3] = 0xff;
+    cmd[4] = raid_port;
+    cmd[5] = JM_RAID_OP_DELETE;       /* 0x01 = delete */
+
+    printf("Deleting RAID at port %d\n", raid_port);
+
+    send_cmd(fd, scrambled_cmd, cmd, sizeof(cmd), resp);
+
+    if (resp[0x0B] == 0x00) {
+        printf("RAID delete command sent (check status to verify)\n");
+        return 0;
+    } else if (resp[0x0B] == 0xFF) {
+        fprintf(stderr, "Command not supported (controller uses jumpers?)\n");
+        return 1;
+    }
+    fprintf(stderr, "Failed (status: 0x%02x)\n", resp[0x0B]);
+    return 1;
+}
+
+/*
+ * Add spare disk (UNTESTED)
+ *
+ * Reverse-engineered from raidmgr_static SetSpareDisk/RaidmgrAddSpareDisk.
+ * Each disk entry in the config is 16 bytes with operation code at offset 0.
+ */
+static int cmd_spare_add(int fd, uint32_t scrambled_cmd, int disk, int raid_port)
+{
+    uint8_t cmd[0x1E2];
+    uint8_t resp[SECTORSIZE];
+
+    fprintf(stderr, "WARNING: Add spare is UNTESTED and may not work!\n");
+    fprintf(stderr, "Your controller may use jumpers for spare configuration.\n\n");
+
+    memset(cmd, 0, sizeof(cmd));
+    cmd[0] = 0x00;
+    cmd[1] = JM_CMD_TYPE_RAID;        /* 0x03 */
+    cmd[2] = JM_RAID_CREATE_DELETE;   /* 0x04 */
+    cmd[3] = 0xff;
+    cmd[4] = raid_port;
+
+    /* Spare disk entry at offset 0x22 (16 bytes per entry) */
+    cmd[0x22] = JM_SPARE_OP_ADD;      /* 0x92 = add spare */
+    cmd[0x23] = raid_port;            /* RAID port */
+    cmd[0x24] = 0x0f;                 /* flags */
+    cmd[0x26] = disk;                 /* SATA port of spare disk */
+    cmd[0x28] = 0x02;                 /* spare type */
+    cmd[0x29] = 0x00;
+
+    printf("Adding disk %d as spare for RAID port %d\n", disk, raid_port);
+
+    send_cmd(fd, scrambled_cmd, cmd, sizeof(cmd), resp);
+
+    if (resp[0x0B] == 0x00) {
+        printf("Spare add command sent (check status to verify)\n");
+        return 0;
+    } else if (resp[0x0B] == 0xFF) {
+        fprintf(stderr, "Command not supported (controller uses jumpers?)\n");
+        return 1;
+    }
+    fprintf(stderr, "Failed (status: 0x%02x)\n", resp[0x0B]);
+    return 1;
+}
+
+/*
+ * Delete spare disk (UNTESTED)
+ *
+ * Reverse-engineered from raidmgr_static RaidmgrDeleteSpareDisk.
+ */
+static int cmd_spare_delete(int fd, uint32_t scrambled_cmd, int disk, int raid_port)
+{
+    uint8_t cmd[0x1E2];
+    uint8_t resp[SECTORSIZE];
+
+    fprintf(stderr, "WARNING: Delete spare is UNTESTED and may not work!\n");
+    fprintf(stderr, "Your controller may use jumpers for spare configuration.\n\n");
+
+    memset(cmd, 0, sizeof(cmd));
+    cmd[0] = 0x00;
+    cmd[1] = JM_CMD_TYPE_RAID;        /* 0x03 */
+    cmd[2] = JM_RAID_CREATE_DELETE;   /* 0x04 */
+    cmd[3] = 0xff;
+    cmd[4] = raid_port;
+
+    /* Spare disk entry at offset 0x22 */
+    cmd[0x22] = JM_SPARE_OP_DELETE;   /* 0xc8 = delete spare */
+    cmd[0x23] = raid_port;
+    cmd[0x24] = 0x0f;
+    cmd[0x26] = disk;
+    cmd[0x28] = 0x02;
+    cmd[0x29] = 0x00;
+
+    printf("Removing disk %d as spare from RAID port %d\n", disk, raid_port);
+
+    send_cmd(fd, scrambled_cmd, cmd, sizeof(cmd), resp);
+
+    if (resp[0x0B] == 0x00) {
+        printf("Spare delete command sent (check status to verify)\n");
+        return 0;
+    } else if (resp[0x0B] == 0xFF) {
+        fprintf(stderr, "Command not supported (controller uses jumpers?)\n");
+        return 1;
+    }
+    fprintf(stderr, "Failed (status: 0x%02x)\n", resp[0x0B]);
+    return 1;
 }

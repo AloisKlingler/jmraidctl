@@ -16,6 +16,12 @@ Commands
   smart P           Show SMART attributes for disk P
   trim P LBA COUNT  Send TRIM command to disk (JMB39x only)
 
+UNTESTED Commands (reverse-engineered, may not work on all hardware):
+  raid-create LVL DISKS STRIPE   Create RAID array
+  raid-delete PORT               Delete RAID array
+  spare-add DISK RAID-PORT       Add spare disk
+  spare-delete DISK RAID-PORT    Remove spare disk
+
 Usage
 -----
   ./jmraidctl /dev/sgX <jmb39x|jms56x>              Show RAID status
@@ -31,6 +37,21 @@ Usage
   ./jmraidctl /dev/sgX jmb39x trim 0 1000000 100    TRIM 100 sectors at LBA 1000000
   ./jmraidctl -h                                    Show help
 
+UNTESTED Commands (use at your own risk):
+  ./jmraidctl /dev/sgX jms56x raid-create 1 3 64    Create RAID1 with disks 0+1, 64KB stripe
+  ./jmraidctl /dev/sgX jms56x raid-delete 0         Delete RAID at port 0
+  ./jmraidctl /dev/sgX jms56x spare-add 2 0         Add disk 2 as spare for RAID port 0
+  ./jmraidctl /dev/sgX jms56x spare-delete 2 0      Remove spare disk 2
+
+  Parameters for raid-create:
+    LVL:    RAID level (0=RAID0, 1=RAID1, 5=RAID5)
+    DISKS:  Bitmask of disks (1=disk0, 2=disk1, 3=disk0+1, 7=disk0+1+2)
+    STRIPE: Stripe size in KB (64, 128, 256)
+
+  Note: Many JMB39x and JMS56x controllers use jumpers for RAID configuration,
+  making these software commands unsupported. The commands will return an
+  error if the controller does not support software RAID configuration.
+
 TRIM Support
 ------------
 The trim command sends ATA DATA SET MANAGEMENT (TRIM) commands to SSDs
@@ -39,6 +60,14 @@ in RAID arrays where automatic TRIM passthrough may not work.
 
 Note: JMS56x controllers do not support DATA OUT ATA commands, so TRIM
 only works with JMB39x controllers.
+
+Important: I/O Delays
+---------------------
+This tool includes 50ms delays between sector I/O operations. Without these
+delays, rapid successive writes can cause ATA timeouts and lock up the
+controller. In this state, the controller disappears from BIOS and a forced
+power off / power on cycle is required to recover (a soft reboot is not
+sufficient). The exact minimum safe delay value is unknown.
 
 Building
 --------
